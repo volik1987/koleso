@@ -35,6 +35,7 @@ addEventListener('resize', () => {
 // ---------- состояние ----------
 const S = {
   mode: null,           // 'xr' | 'cam'
+  app: null,            // 'game' | 'ruler'
   phase: 'menu',        // menu | placing | play | over
   floorY: 0,
   floorFound: false,
@@ -405,7 +406,7 @@ gate.visible = false; scene.add(gate);
 // ---------- режим WebXR (настоящий пол) ----------
 let xrSession = null, hitSource = null, xrRef = null;
 const floorSamples = [];
-async function startXR() {
+async function startXR(app = 'game') {
   audio();
   xrSession = await navigator.xr.requestSession('immersive-ar', {
     requiredFeatures: ['hit-test'], optionalFeatures: ['dom-overlay', 'local-floor'], domOverlay: { root: $('ui') },
@@ -418,7 +419,8 @@ async function startXR() {
   S.mode = 'xr'; S.floorFound = false; floorSamples.length = 0;
   xrSession.addEventListener('select', onXRSelect);
   xrSession.addEventListener('end', () => { hitSource = null; xrSession = null; reticle.visible = false; toMenu(); });
-  enterPlacing();
+  S.app = app;
+  if (app === 'ruler') enterRuler(); else enterPlacing();
 }
 function onXRSelect(e) {
   const pose = e.frame.getPose(e.inputSource.targetRaySpace, xrRef);
@@ -426,6 +428,7 @@ function onXRSelect(e) {
   const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
   const o = new V3().setFromMatrixPosition(m);
   const d = new V3(0, 0, -1).transformDirection(m);
+  if (S.app === 'ruler') { rulerTap(); return; }
   if (S.phase === 'placing' && reticle.visible) placeGate(new V3().setFromMatrixPosition(reticle.matrix));
   else shoot(o, d);
 }
@@ -440,8 +443,10 @@ function xrFrame(frame) {
       const m = new THREE.Matrix4().fromArray(pose.transform.matrix);
       const n = new V3(0, 1, 0).transformDirection(m);
       const p = new V3().setFromMatrixPosition(m);
-      // горизонтальная плоскость минимум в 70 см под телефоном — это пол, а не стол
-      if (n.y > 0.85 && camY - p.y > 0.7) {
+      // линейка: годится любая поверхность (пол, стол, стена)
+      if (S.app === 'ruler') { ok = true; reticle.matrix.copy(m); }
+      // игра: горизонтальная плоскость минимум в 70 см под телефоном — это пол, а не стол
+      else if (n.y > 0.85 && camY - p.y > 0.7) {
         ok = true;
         floorSamples.push(p.y); if (floorSamples.length > 30) floorSamples.shift();
         const sorted = [...floorSamples].sort((a, b) => a - b);
@@ -451,7 +456,7 @@ function xrFrame(frame) {
       }
     }
   }
-  reticle.visible = ok && S.phase === 'placing';
+  reticle.visible = ok && (S.phase === 'placing' || S.phase === 'ruler');
   if (S.phase === 'placing') hint(ok ? 'Пол найден! Тапни туда, откуда покатятся колёса (подальше от себя)' : 'Медленно поводи телефоном, направив камеру на пол…');
 }
 
@@ -489,13 +494,14 @@ renderer.domElement.addEventListener('pointerup', e => {
   if (!drag) return;
   const wasDrag = drag.moved; drag = null;
   if (wasDrag || S.mode !== 'cam') return;
+  if (S.app === 'ruler') { rulerTap(); return; }
   const ndc = new THREE.Vector2(e.clientX / innerWidth * 2 - 1, -(e.clientY / innerHeight) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
   shoot(raycaster.ray.origin.clone(), raycaster.ray.direction.clone());
 });
 
 let grid = null;
-async function startCam() {
+async function startCam(app = 'game') {
   audio();
   // гироскоп: на iPhone нужно разрешение, спрашивать строго по нажатию
   try {
@@ -518,6 +524,8 @@ async function startCam() {
   $('height').style.display = 'block';
   $('exit').style.display = 'block';
   applyOrientation();
+  S.app = app;
+  if (app === 'ruler') { enterRuler(); return; }
   // ворота — в 4 м перед собой по направлению взгляда
   const f = new V3(0, 0, -1).applyQuaternion(camera.quaternion).setY(0);
   if (f.lengthSq() < 1e-4) f.set(0, 0, -1);
@@ -563,13 +571,211 @@ function toMenu() {
   const v = $('video'); if (v.srcObject) { v.srcObject.getTracks().forEach(t => t.stop()); v.srcObject = null; } v.style.display = 'none';
   removeEventListener('deviceorientation', onOrient); orientOK = false;
   scene.background = null; if (grid) grid.visible = false;
-  S.mode = null;
+  exitRuler();
+  S.mode = null; S.app = null;
 }
 
+
+// ---------- ЛИНЕЙКА ----------
+// Android (WebXR): точка — там, где центр экрана попадает в реальную поверхность (hit-test).
+// iPhone/без AR: точка — пересечение луча из центра экрана с полом на высоте телефона (примерно).
+const JKEY = 'koleso.ruler.v1';
+let journal = [];
+try { journal = JSON.parse(localStorage.getItem(JKEY) || '[]'); } catch (e) { journal = []; }
+const saveJ = () => { try { localStorage.setItem(JKEY, JSON.stringify(journal)); } catch (e) {} };
+
+const rulerGroup = new THREE.Group(); scene.add(rulerGroup);
+const dotGeo = new THREE.SphereGeometry(0.009, 16, 12);
+const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+const segGeo = new THREE.CylinderGeometry(0.0035, 0.0035, 1, 8);
+const segMat = new THREE.MeshBasicMaterial({ color: 0xffd36b, depthTest: false, transparent: true });
+const R_ = { a: null, aDot: null, live: null, liveLabel: null, approx: false };
+
+function fmtLen(m) {
+  if (m < 1) return (m * 100).toFixed(m < 0.1 ? 1 : 0).replace('.', ',') + ' см';
+  return m.toFixed(2).replace('.', ',') + ' м';
+}
+function makeLabel() {
+  const c = document.createElement('canvas'); c.width = 320; c.height = 110;
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace;
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+  sp.renderOrder = 10; sp.userData = { c, tex, text: '' };
+  return sp;
+}
+function setLabel(sp, text) {
+  if (sp.userData.text === text) return;
+  sp.userData.text = text;
+  const { c, tex } = sp.userData, x = c.getContext('2d');
+  x.clearRect(0, 0, c.width, c.height);
+  x.font = 'bold 58px -apple-system, system-ui, sans-serif';
+  const w = Math.min(c.width - 8, x.measureText(text).width + 48);
+  x.fillStyle = '#ffffff'; x.beginPath(); x.roundRect((c.width - w) / 2, 10, w, 90, 45); x.fill();
+  x.fillStyle = '#111'; x.textAlign = 'center'; x.textBaseline = 'middle'; x.fillText(text, c.width / 2, 57);
+  tex.needsUpdate = true;
+}
+function setSeg(mesh, a, b) {
+  const d = new V3().subVectors(b, a), len = d.length();
+  mesh.position.copy(a).addScaledVector(d, 0.5);
+  mesh.scale.set(1, Math.max(len, 1e-4), 1);
+  mesh.quaternion.setFromUnitVectors(UP, len > 1e-6 ? d.normalize() : UP);
+}
+function placeLabel(sp, a, b) {
+  const mid = new V3().addVectors(a, b).multiplyScalar(0.5);
+  const camP = viewCam().getWorldPosition(new V3());
+  const dist = Math.max(0.2, camP.distanceTo(mid));
+  sp.position.copy(mid).add(new V3(0, 0.02 + dist * 0.03, 0));
+  sp.scale.set(dist * 0.19, dist * 0.19 * 110 / 320, 1);
+}
+const cross = $('cross');
+function enterRuler() {
+  $('start').style.display = 'none'; $('over').style.display = 'none'; $('hud').style.display = 'none';
+  $('exit').style.display = 'block'; $('rulerBar').style.display = 'flex'; cross.style.display = 'block';
+  gate.visible = false;
+  S.phase = 'ruler';
+  R_.approx = S.mode !== 'xr';
+  $('height').style.display = R_.approx ? 'block' : 'none';
+  updJCount();
+  hint(R_.approx
+    ? 'Режим без AR: меряем только по полу и примерно. Наведи крестик на начало и нажми ＋'
+    : 'Поводи телефоном, пока не появится кружок на поверхности. Наведи на начало и нажми ＋');
+}
+function exitRuler() {
+  rulerGroup.clear(); R_.a = null; R_.aDot = R_.live = R_.liveLabel = null;
+  $('rulerBar').style.display = 'none'; cross.style.display = 'none'; $('nameBar').style.display = 'none';
+}
+function reticlePoint() {
+  if (S.mode === 'xr') return reticle.visible ? new V3().setFromMatrixPosition(reticle.matrix) : null;
+  // без AR: луч из центра экрана до пола (пол на высоте телефона ниже камеры)
+  const o = camera.getWorldPosition(new V3());
+  const d = new V3(0, 0, -1).applyQuaternion(camera.quaternion);
+  if (d.y > -0.03) return null;
+  const t = (S.floorY - o.y) / d.y;
+  if (t > 12) return null;
+  return o.addScaledVector(d, t);
+}
+function rulerFrame() {
+  if (S.phase !== 'ruler') return;
+  const p = reticlePoint();
+  if (S.mode !== 'xr') {
+    reticle.visible = !!p;
+    if (p) reticle.matrix.makeTranslation(p.x, p.y + 0.002, p.z);
+  }
+  cross.classList.toggle('on', !!p);
+  if (R_.a && p) {
+    if (!R_.live) {
+      R_.live = new THREE.Mesh(segGeo, segMat); R_.live.renderOrder = 9; rulerGroup.add(R_.live);
+      R_.liveLabel = makeLabel(); rulerGroup.add(R_.liveLabel);
+    }
+    R_.live.visible = R_.liveLabel.visible = true;
+    setSeg(R_.live, R_.a, p);
+    setLabel(R_.liveLabel, (R_.approx ? '≈ ' : '') + fmtLen(R_.a.distanceTo(p)));
+    placeLabel(R_.liveLabel, R_.a, p);
+  } else if (R_.live) { R_.live.visible = R_.liveLabel.visible = false; }
+  // подписи готовых замеров держим читаемого размера
+  rulerGroup.children.forEach(o => { if (o.userData.seg) placeLabel(o, o.userData.seg[0], o.userData.seg[1]); });
+}
+function dot(p) { const m = new THREE.Mesh(dotGeo, dotMat); m.position.copy(p); m.renderOrder = 11; rulerGroup.add(m); return m; }
+function rulerTap(fromButton = false) {
+  if (S.phase !== 'ruler') return;
+  if (nameEntry && !fromButton) { closeNameBar(true); return; }   // тап мимо строки названия — просто закрыть её
+  if (nameEntry) closeNameBar(true);
+  audio();
+  const p = reticlePoint();
+  if (!p) { hint(S.mode === 'xr' ? 'Не вижу поверхность — поводи телефоном' : 'Наведи крестик на пол'); return; }
+  if (!R_.a) {
+    R_.a = p; R_.aDot = dot(p);
+    tone(880, 880, 0.06, 'sine', 0.15); buzz(15);
+    hint('Теперь наведи на конец и нажми ＋');
+    return;
+  }
+  const a = R_.a, b = p, len = a.distanceTo(b);
+  if (len < 0.005) { hint('Точки совпадают — отведи крестик'); return; }
+  dot(b);
+  const seg = new THREE.Mesh(segGeo, segMat); seg.renderOrder = 9; setSeg(seg, a, b); rulerGroup.add(seg);
+  const lab = makeLabel(); setLabel(lab, (R_.approx ? '≈ ' : '') + fmtLen(len)); lab.userData.seg = [a.clone(), b.clone()]; rulerGroup.add(lab);
+  R_.a = null; R_.aDot = null;
+  tone(880, 1320, 0.12, 'triangle', 0.18); buzz(30);
+  const entry = { id: Date.now(), name: 'Замер ' + (journal.length + 1), len, approx: R_.approx, at: new Date().toISOString(),
+    a: a.toArray().map(v => +v.toFixed(4)), b: b.toArray().map(v => +v.toFixed(4)) };
+  journal.unshift(entry); saveJ(); updJCount();
+  hint('');
+  openNameBar(entry);
+}
+function rulerUndo() {
+  if (R_.a) { rulerGroup.remove(R_.aDot); R_.a = null; R_.aDot = null; hint('Начало сброшено. Наведи на начало и нажми ＋'); }
+  else { // убрать с экрана последний замер (в журнале он остаётся)
+    const k = rulerGroup.children.length;
+    if (k) { for (let i = 0; i < 4 && rulerGroup.children.length; i++) rulerGroup.remove(rulerGroup.children[rulerGroup.children.length - 1]); }
+    R_.live = R_.liveLabel = null;
+  }
+}
+// подписать замер сразу после измерения
+let nameEntry = null;
+function openNameBar(e) {
+  nameEntry = e;
+  $('nameLen').textContent = (e.approx ? '≈ ' : '') + fmtLen(e.len);
+  const inp = $('nameInp'); inp.value = ''; inp.placeholder = e.name;
+  $('nameBar').style.display = 'flex';
+}
+function closeNameBar(save) {
+  if (save && nameEntry) { const v = $('nameInp').value.trim(); if (v) { nameEntry.name = v; saveJ(); } }
+  $('nameInp').blur(); $('nameBar').style.display = 'none'; nameEntry = null;
+}
+$('nameOk').onclick = () => closeNameBar(true);
+$('nameInp').addEventListener('keydown', e => { if (e.key === 'Enter') closeNameBar(true); });
+$('nameSkip').onclick = () => closeNameBar(false);
+
+// журнал
+function updJCount() { $('btnJ').textContent = '📋 ' + journal.length; $('btnJournal').textContent = '📋 Журнал замеров (' + journal.length + ')'; }
+const esc = t => String(t).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+function renderJournal() {
+  const L = $('jlist');
+  if (!journal.length) { L.innerHTML = '<p class="small">Пока пусто. Включи «Линейку», поставь две точки — замер появится здесь.</p>'; return; }
+  L.innerHTML = journal.map(e => {
+    const d = new Date(e.at);
+    const when = d.toLocaleDateString('ru-RU', { day: 'numeric', month: 'short' }) + ', ' + d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+    return `<div class="jrow" data-id="${e.id}">
+      <input class="jname" value="${esc(e.name)}" aria-label="Что меряли">
+      <span class="jlen">${e.approx ? '≈ ' : ''}${fmtLen(e.len)}</span>
+      <span class="jwhen">${when}${e.approx ? ' · без AR' : ' · AR'}</span>
+      <button class="jdel" aria-label="Удалить">✕</button></div>`;
+  }).join('');
+}
+$('jlist').addEventListener('change', e => {
+  if (!e.target.classList.contains('jname')) return;
+  const it = journal.find(x => x.id == e.target.closest('.jrow').dataset.id);
+  if (it) { it.name = e.target.value.trim() || it.name; saveJ(); }
+});
+$('jlist').addEventListener('click', e => {
+  if (!e.target.classList.contains('jdel')) return;
+  const id = e.target.closest('.jrow').dataset.id;
+  journal = journal.filter(x => x.id != id); saveJ(); updJCount(); renderJournal();
+});
+function openJournal() { closeNameBar(true); renderJournal(); $('journal').style.display = 'flex'; }
+$('btnJ').onclick = openJournal;
+$('btnJournal').onclick = openJournal;
+$('jClose').onclick = () => { $('journal').style.display = 'none'; };
+$('jCopy').onclick = async () => {
+  const txt = journal.map(e => `${e.name} — ${e.approx ? '≈ ' : ''}${fmtLen(e.len)} (${new Date(e.at).toLocaleString('ru-RU')})`).join('\n');
+  try {
+    if (navigator.share && /Mobi|Android|iPhone/i.test(navigator.userAgent)) await navigator.share({ title: 'Замеры', text: txt });
+    else { await navigator.clipboard.writeText(txt); $('jCopy').textContent = '✓ Скопировано'; setTimeout(() => $('jCopy').textContent = '📤 Поделиться', 1500); }
+  } catch (e) {}
+};
+$('jClear').onclick = () => { if (journal.length && confirm('Удалить все замеры?')) { journal = []; saveJ(); updJCount(); renderJournal(); } };
+$('btnPlus').onclick = () => rulerTap(true);
+$('btnUndo').onclick = rulerUndo;
+$('btnRuler').onclick = () => {
+  if (!ready) return;
+  if (S.xrOK) startXR('ruler').catch(e => alert('AR не запустился: ' + e.message));
+  else startCam('ruler');
+};
+updJCount();
+
 // кнопки поверх AR не должны «стрелять»
-for (const id of ['exit', 'height', 'again', 'toMenu', 'over']) $(id).addEventListener('beforexrselect', e => e.preventDefault());
-$('btnCam').onclick = () => { if (ready) startCam(); };
-$('btnXR').onclick = () => { if (ready) startXR().catch(e => { alert('AR не запустился: ' + e.message); }); };
+for (const id of ['exit', 'height', 'again', 'toMenu', 'over', 'rulerBar', 'journal', 'nameBar']) $(id).addEventListener('beforexrselect', e => e.preventDefault());
+$('btnCam').onclick = () => { if (ready) startCam('game'); };
+$('btnXR').onclick = () => { if (ready) startXR('game').catch(e => { alert('AR не запустился: ' + e.message); }); };
 $('again').onclick = () => { if (S.mode === 'cam') newGame(); else newGame(); };
 $('toMenu').onclick = () => { if (xrSession) xrSession.end(); else toMenu(); };
 $('exit').onclick = () => { if (xrSession) xrSession.end(); else toMenu(); };
@@ -581,6 +787,7 @@ $('height').onclick = () => {
 (async () => {
   let xrOK = false;
   try { xrOK = !!(navigator.xr && await navigator.xr.isSessionSupported('immersive-ar')); } catch (e) {}
+  S.xrOK = xrOK;
   $('btnXR').hidden = !xrOK;
   $('btnCam').classList.toggle('alt', xrOK);
   $('modeNote').textContent = xrOK
@@ -595,10 +802,11 @@ renderer.setAnimationLoop((time, frame) => {
   const now = performance.now(); const dt = Math.min(0.05, (now - last) / 1000); last = now;
   if (S.mode === 'xr') xrFrame(frame);
   if (S.mode === 'cam') applyOrientation();
+  if (S.app === 'ruler') rulerFrame();
   gate.material.opacity = 0.35 + Math.sin(S.t * 4) * 0.15;
   step(dt);
   renderer.render(scene, camera);
 });
 
 // для автотестов
-window.__kolesoAPI = { startCam, shoot, makeWheel, newGame, step, camera, scene, get wheels() { return S.wheels; }, TYPES };
+window.__kolesoAPI = { rulerTap, get journal() { return journal; }, startCam, shoot, makeWheel, newGame, step, camera, scene, get wheels() { return S.wheels; }, TYPES };

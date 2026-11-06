@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#1a120b">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<title>Колесо! AR</title>
+<title>Колесо! AR + линейка</title>
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -46,6 +46,30 @@
   #height { position:absolute; top:calc(env(safe-area-inset-top) + 48px); left:12px; min-width:0; padding:8px 12px; font-size:14px; display:none; }
   #pop { position:absolute; left:50%; top:38%; transform:translate(-50%,-50%); font-size:34px; font-weight:900; color:#ffd36b;
     text-shadow:0 3px 0 #000; opacity:0; transition:opacity .3s, transform .3s; pointer-events:none !important; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; justify-content:center; }
+  .row button { min-width:0; }
+  #cross { position:absolute; left:50%; top:50%; width:44px; height:44px; margin:-22px 0 0 -22px; display:none; pointer-events:none !important; opacity:.45; }
+  #cross.on { opacity:1; }
+  #cross::before, #cross::after { content:""; position:absolute; background:#fff; box-shadow:0 0 3px #000; }
+  #cross::before { left:21px; top:0; width:2px; height:44px; }
+  #cross::after { top:21px; left:0; height:2px; width:44px; }
+  #rulerBar { position:absolute; left:0; right:0; bottom:calc(env(safe-area-inset-bottom) + 100px); display:none; justify-content:center; align-items:center; gap:28px; pointer-events:none !important; }
+  #rulerBar button { pointer-events:auto; min-width:0; }
+  #btnPlus { width:78px; height:78px; padding:0; border-radius:50%; font-size:44px; line-height:1; background:#fff; color:#111; box-shadow:0 0 0 5px #ffffff55, 0 4px 12px #0008; }
+  #btnUndo, #btnJ { width:58px; height:58px; padding:0; border-radius:50%; font-size:18px; background:#000a; color:#fff; box-shadow:none; }
+  #nameBar { position:absolute; left:12px; right:12px; top:calc(env(safe-area-inset-top) + 96px); display:none; gap:8px; align-items:center;
+    background:#000c; padding:10px; border-radius:16px; }
+  #nameBar b { font-size:18px; white-space:nowrap; color:#ffd36b; }
+  #nameBar input { flex:1; min-width:0; font:inherit; font-size:16px; padding:10px 12px; border-radius:10px; border:0; }
+  #nameBar button { min-width:0; padding:10px 14px; font-size:15px; }
+  #journal { justify-content:flex-start; padding-top:calc(env(safe-area-inset-top) + 24px); overflow:auto; }
+  #jlist { width:100%; max-width:520px; display:flex; flex-direction:column; gap:8px; }
+  .jrow { display:grid; grid-template-columns:1fr auto auto; grid-template-areas:"name len del" "when when del"; gap:2px 10px; align-items:center;
+    background:#ffffff14; border-radius:12px; padding:10px 12px; text-align:left; }
+  .jname { grid-area:name; font:inherit; font-size:16px; font-weight:700; color:var(--cream); background:transparent; border:0; border-bottom:1px dashed #ffffff40; padding:2px 0; min-width:0; }
+  .jlen { grid-area:len; font-size:20px; font-weight:800; color:#ffd36b; white-space:nowrap; }
+  .jwhen { grid-area:when; font-size:12px; opacity:.6; }
+  .jdel { grid-area:del; min-width:0; padding:8px 11px; font-size:14px; background:#ffffff1a; color:#fff; box-shadow:none; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -62,6 +86,9 @@
   <div class="hud" id="hud"><span class="lives" id="lives">❤️❤️❤️</span><span class="lvl" id="lvl">Уровень 1</span><span id="score">0</span></div>
   <div id="pop"></div>
   <div class="hint" id="hint"></div>
+  <div id="cross"></div>
+  <div id="rulerBar"><button id="btnUndo" aria-label="Отменить">↶</button><button id="btnPlus" aria-label="Поставить точку">＋</button><button id="btnJ" aria-label="Журнал">📋 0</button></div>
+  <div id="nameBar"><b id="nameLen"></b><input id="nameInp" placeholder="Что меряли?" enterkeyhint="done"><button id="nameOk">OK</button><button class="alt" id="nameSkip">✕</button></div>
   <button class="alt" id="exit">✕ Выход</button>
   <button class="alt" id="height">📱 1.4 м</button>
 
@@ -71,8 +98,17 @@
     <p>По полу на тебя катятся тяжёлые колёса. Тыкай в них пальцем — каждое касание выбивает куски. Разломай колесо, пока оно тебя не задавило!</p>
     <button id="btnXR" hidden>▶ Играть в AR</button>
     <button id="btnCam">▶ Играть с камерой</button>
+    <div class="row"><button class="alt" id="btnRuler">📏 Линейка</button><button class="alt" id="btnJournal">📋 Журнал замеров</button></div>
     <p class="small" id="modeNote">Проверяю поддержку AR…</p>
     <p class="small" id="loadNote">Загружаю колесо…</p>
+  </div>
+
+  <div class="panel glass" id="journal" style="display:none">
+    <h2>📋 Журнал замеров</h2>
+    <p class="small">Название можно поправить прямо в списке. «≈» — замер без AR (по полу, примерно).</p>
+    <div id="jlist"></div>
+    <div class="row"><button class="alt" id="jCopy">📤 Поделиться</button><button class="alt" id="jClear">🗑 Очистить</button></div>
+    <button id="jClose">Закрыть</button>
   </div>
 
   <div class="panel glass" id="over" style="display:none">

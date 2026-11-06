@@ -1,5 +1,5 @@
 // Офлайн-кэш «Колесо!»: свои файлы — заранее, three.js с CDN — при первом запросе.
-const CACHE = 'koleso-v1';
+const CACHE = 'koleso-v2';
 const CDN = 'https://cdn.jsdelivr.net/npm/three@0.160.0/';
 const OWN = ['./', 'index.html', 'game.js', 'manifest.webmanifest', 'koleso_derevo.glb', 'koleso_avto.glb',
   'icon-192.png', 'icon-512.png', 'apple-touch-icon.png'];
