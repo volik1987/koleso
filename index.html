@@ -6,6 +6,12 @@
 <meta name="theme-color" content="#1a120b">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Колесо! AR</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-title" content="Колесо!">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="mobile-web-app-capable" content="yes">
 <style>
   :root { --wood:#c98a4b; --dark:#1a120b; --red:#e2412f; --cream:#fbefd9; }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
@@ -77,5 +83,6 @@
   </div>
 </div>
 <script type="module" src="game.js"></script>
+<script>if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));</script>
 </body>
 </html>
